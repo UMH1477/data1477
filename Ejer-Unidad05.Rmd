@@ -1,0 +1,308 @@
+---
+title: "Ejer-Unidad05"
+author: "A.M.Mayoral & J.Morales"
+date: "25 mayo 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(gridExtra)
+library(kableExtra)
+library(queueing)
+library(simmer)
+library(simmer.bricks)
+library(simmer.plot)
+library(parallel)
+```
+
+```{r echo=FALSE}
+# FUNCIONES SIMULACIÓN COLAS
+#################################################
+# Sistema MM1
+#################################################
+cola.MM1 <- function(t, lambda, mu)
+{
+  # lambda: tasa de llegadas
+  # mu: tasa de servicio
+
+  # Funciones de tiempos
+  tarrival <- function() rexp(1, lambda)
+  tserver <- function() rexp(1, mu)
+  
+  # Trayectoria de servicio
+  servicio <- trajectory() %>%
+    visit("server", tserver)               
+
+  # Entorno del sistema 
+  #################################################
+  simmer() %>%
+    add_resource("server", capacity = 1, queue_size = Inf) %>%           
+    add_generator("arrival", servicio, tarrival) %>% 
+    run(until = t)     
+}
+#################################################
+# Sistema M/M/1/K
+#################################################
+cola.MM1K <- function(t, lambda, mu, K)
+{
+  # lambda: tasa de llegadas
+  # mu: tasa de servicio
+  # K: capacidad del sistema
+
+  # Funciones de tiempos
+  tarrival <- function() rexp(1, lambda)
+  tserver <- function() rexp(1, mu)
+  
+  # Tamaño de la cola
+  qsize <- K - 1
+  
+  # Trayectoria de servicio
+  servicio <- trajectory() %>%
+    visit("server", tserver)               
+
+  # Entorno del sistema 
+  #################################################
+  simmer() %>%
+    add_resource("server", capacity = 1, queue_size = qsize) %>%           
+    add_generator("arrival", servicio, tarrival) %>% 
+    run(until = t)     
+}
+#################################################
+# Sistema M/M/s
+#################################################
+cola.MMs <- function(t, lambda, mu, s)
+{
+  # lambda: tasa de llegadas
+  # mu: tasa de servicio
+  # s: servidores idénticos disponibles
+
+  # Funciones de tiempos
+  tarrival <- function() rexp(1, lambda)
+  tserver <- function() rexp(1, mu)
+  
+  # Trayectoria de servicio
+  servicio <- trajectory() %>%
+    visit("server", tserver)               
+
+  # Entorno del sistema 
+  #################################################
+  simmer() %>%
+    add_resource("server", capacity = s, queue_size = Inf) %>%           
+    add_generator("arrival", servicio, tarrival) %>% 
+    run(until = t)     
+}
+
+#################################################
+# Sistema M/M/s/K
+#################################################
+cola.MMsK <- function(t, lambda, mu, s, K)
+{
+  # lambda: tasa de llegadas
+  # mu: tasa de servicio
+  # s: servidores
+  # K: capacidad del sistema
+
+  # Funciones de tiempos
+  tarrival <- function() rexp(1, lambda)
+  tserver <- function() rexp(1, mu)
+  
+  # Tamaño de la cola
+  qsize <- K - s
+  
+  # Trayectoria de servicio
+  servicio <- trajectory() %>%
+    visit("server", tserver)               
+
+  # Entorno del sistema 
+  #################################################
+  simmer() %>%
+    add_resource("server", capacity = s, queue_size = qsize) %>%           
+    add_generator("arrival", servicio, tarrival) %>% 
+    run(until = t)     
+}
+```
+
+# Ejercicio A5.16
+
+Al servicio de urgencias de un hospital los pacientes llegan según un Proceso de Poisson de tasa 3 pacientes/hora. El médico que está en dicho servicio los atiende a razón de 4 pacientes/hora (tiempos exponenciales). ¿Contrataría o no a un segundo médico? 
+
+>El primer sistema (S1) se trata de una cola M/M/1 con tasa de llegadas $\lambda=3$ pac/h y tasa de servicios $\mu=4$ pac/h. El segundo (S2) con un segundo médico, sería M/M/2. Definimos el entorno de colas para ambos sistemas y vamos respondiendo a las cuestiones comparándolos.
+
+```{r}
+lambda=3;mu=4
+env.mm1 <- NewInput.MM1(lambda = lambda, mu = mu,n=4)
+s.mm1 <- QueueingModel(env.mm1)
+env.mm2 <- NewInput.MMC(lambda = lambda, mu = mu, c = 2, n = 4)
+s.mm2 <- QueueingModel(env.mm2)
+
+# y pedimos un descriptivo rápido
+sum.mm1=summary(s.mm1)
+sum.mm2=summary(s.mm2)
+sum.mm1;sum.mm2
+```
+
+Para responder a esta pregunta se deben comparar las siguientes características en ambos sistemas:
+
+1. Probabilidad de que no se encuentren pacientes en el departamento de emergencias. 
+
+Nos piden $Pr(N=0)=p_0$, que según el descriptivo global, para el valor de $P0$, vale `r sum.mm1[[1]]$P0` para S1 y `r sum.mm2[[1]]$P0` para S2. Es más probable tener urgencias vacías con dos doctores que con 1.
+```{r}
+sum.mm1[[1]]$P0;sum.mm2[[1]]$P0
+# también lo podríamos calcular con Pn
+s.mm1$Pn[1]
+s.mm2$Pn[1]
+```
+
+2. Probabilidad de que existan 3 pacientes en urgencias. 
+```{r}
+# también lo podríamos calcular con Pn
+s.mm1$Pn[4]
+s.mm2$Pn[4]
+```
+El ratio de comparación entre las dos probabilidades para urgencias con 1 y 2 doctores es `r round(s.mm1$Pn[4]/s.mm2$Pn[4],3)`.
+
+3. Tiempo total de permanencia de un paciente en urgencias. 
+
+Respondemos con el tiempo medio de espera en el sistema, $W$, que es `r s.mm1$W` hora para S1 y `r s.mm2$W`h para S2; es decir, el tiempo de permanencia en urgencias se reduce en `r (s.mm1$W-s.mm2$W)*60` minutos cuando hay dos doctores.
+
+4. Tiempo total de espera en urgencias. 
+
+Nos preguntan por $Wq$, que es `r s.mm1$Wq` horas (`r s.mm1$Wq*60` minutos) en S1 y `r s.mm2$Wq` horas (`r s.mm2$Wq*60` minutos) en S2. 
+
+5. El número de pacientes en urgencias en un momento dado. 
+
+Buscamos el número medio de pacientes en el sistema, $L$, que es `r s.mm1$L` pacientes para S1 y `r s.mm2$L` pacientes para S2, que son claramente distintos y favorecen el sistema con 2 doctores. 
+
+6. El número de pacientes en urgencias esperando a ser atendidos. 
+
+Respondemos con $Lq$, que es `r s.mm1$Lq` para S1 y `r s.mm2$Lq` para S2. La ocupación de la sala de espera se reduce sustancialmente cuando hay dos doctores.
+
+7. Probabilidad de que un paciente permanezca más de 1 hora en urgencias.
+
+Calculamos la $Pr(T >1)$ con la función de distribución $FW$
+```{r}
+1-s.mm1$FW(1)
+1-s.mm2$FW(1)
+```
+La probabilidad de que un paciente esté en urgencias más de una hora es `r round(1-s.mm1$FW(1),4)`  cuando hay un doctor y `r round(1-s.mm2$FW(1),4)` cuando hay dos. 
+
+8. Probabilidad de que un paciente espere más de 1 hora a ser atendido.
+
+Calculamos la $Pr(T_q >1)$ con la función de distribución $FWq$
+```{r}
+1-s.mm1$FWq(1)
+1-s.mm2$FWq(1)
+```
+La probabilidad de que un paciente espere más de una hora a ser atendido es  `r round(1-s.mm1$FWq(1),4)`  cuando hay un doctor y `r round(1-s.mm2$FWq(1),4)` cuando hay 2.
+
+
+Como conclusión, es más eficiente tener a dos doctores que a uno.
+
+
+Aproximamos a continuación las cuestiones 1, 3 y 4 mediante simulación con las funciones `cola.MM1(t, lambda, mu)` y `cola.MMs(t, lambda, mu,s)` programadas en `simmer` y disponibles.
+
+Simulamos.
+```{r}
+lambda=3;mu=4
+# tiempo de funcionamiento del sistema
+t=500 # tiempo total simulado
+nreplicas=500 # número de réplicas
+s.mm1=mclapply(1:nreplicas, function(i){
+   cola.MM1(t, lambda,mu)%>%
+    wrap()},mc.set.seed=FALSE)
+s.mm2=mclapply(1:nreplicas, function(i){
+   cola.MMs(t, lambda,mu,2)%>%
+    wrap()},mc.set.seed=FALSE)
+# almacenamos análisis de recursos del sistema
+sim.mm1<-as_tibble(get_mon_resources(s.mm1))
+sim.mm2<-as_tibble(get_mon_resources(s.mm2))
+head(sim.mm2)
+```
+
+Calculamos la probabilidad de que no haya pacientes en Urgencias, aproximando $p_0$.
+```{r}
+# tiempo con estado=0
+p0.mm1=p0.mm2=vector()
+for(i in 1:nreplicas){
+  # para la mm1
+ sim.sel=sim.mm1[sim.mm1$replication==i,] 
+ estados=c(0,sim.sel$system)
+ periodos=diff(c(0,sim.sel$time,t))
+ estados.sim=data.frame(estados,periodos)
+ p0.mm1[i]=sum(estados.sim$periodos[estados.sim$estados==0])/t
+  # para la mm2
+ sim.sel=sim.mm2[sim.mm2$replication==i,] 
+ estados=c(0,sim.sel$system)
+ periodos=diff(c(0,sim.sel$time,t))
+ estados.sim=data.frame(estados,periodos)
+ p0.mm2[i]=sum(estados.sim$periodos[estados.sim$estados==0])/t
+}
+
+p0.m1=mean(p0.mm1)*100
+p0.error1=sd(p0.mm1)/sqrt(nreplicas)*100
+p0.m2=mean(p0.mm2)*100
+p0.error2=sd(p0.mm2)/sqrt(nreplicas)*100
+# Ya obtenemos la estimación MC y su error
+cat("\n Tiempo que ha estado vacío el servicio de urgencias en S1: ",round(p0.m1,2),"% (error=",round(p0.error1,2),"%).")
+cat("\n Tiempo que ha estado vacío el servicio de urgencias en S2: ",round(p0.m2,2),"% (error=",round(p0.error2,2),"%).")
+
+0.2494*24*30
+```
+
+Estimamos el tiempo medio de permanencia en urgencias y también el tiempo de espera, a partir del data.frame que contiene los tiempos para cada uno de los pacientes que han pasado por urgencias.
+```{r}
+# almacenamos análisis de llegadas al sistema
+arr.mm1<-as_tibble(get_mon_arrivals(s.mm1))
+arr.mm2<-as_tibble(get_mon_arrivals(s.mm2))
+
+tpo.mm1=arr.mm1 %>%
+  group_by(replication) %>%
+  summarise(permanencia=mean(end_time-start_time),
+            espera=mean(end_time-start_time-activity_time))%>%
+  summarise(permanencia.m=mean(permanencia),permanencia.err=sd(permanencia)/sqrt(nreplicas),
+            espera.m=mean(espera),espera.err=sd(espera)/sqrt(nreplicas))
+
+cat("\n Permanencia media en urgencias con 1 doctor:",round(tpo.mm1$permanencia.m,2),"h (",round(tpo.mm1$permanencia.err,4),")")
+cat("\n Espera media en urgencias con 1 doctor:",round(tpo.mm1$espera.m,2),"h (",round(tpo.mm1$espera.err,4),")")
+
+tpo.mm2=arr.mm2 %>%
+  group_by(replication) %>%
+  summarise(permanencia=mean(end_time-start_time),
+            espera=mean(end_time-start_time-activity_time))%>%
+  summarise(permanencia.m=mean(permanencia),permanencia.err=sd(permanencia)/sqrt(nreplicas),
+            espera.m=mean(espera),espera.err=sd(espera)/sqrt(nreplicas))
+
+cat("\n Permanencia media en urgencias con 2 doctores:",round(tpo.mm2$permanencia.m,2),"h (",round(tpo.mm2$permanencia.err,4),")")
+cat("\n Espera media en urgencias con 2 doctores:",round(tpo.mm2$espera.m,2),"h (",round(tpo.mm2$espera.err,4),")")
+  
+```
+
+
+## Ejercicio A5.12. 
+
+Un pequeño autoservicio de lavado en el que el coche que entra no puede hacerlo hasta que el otro haya salido completamente, tiene una capacidad de aparcamiento de 10 coches, incluyendo el que está siendo lavado. La empresa ha estimado que los coches llegan según un proceso de Poisson con una media de 20 coches/hora, y el tiempo de lavado sigue una distribución exponencial de 12 minutos. La empresa abre durante 10 horas al día. ¿Cuál es la media de coches perdidos cada día debido a las limitaciones de espacio?
+
+```{r}
+lambda=20;mu=60/12 # coches por hora
+env.mm <- NewInput.MMCK(lambda = lambda, mu = mu,c=1,k=10)
+s.mm <- QueueingModel(env.mm)
+
+# y pedimos un descriptivo rápido
+sum.mm=summary(s.mm)
+sum.mm
+# probabilidad de encontrar el autolavado lleno
+s.mm$Qn[10]
+# número de coches que llegan en un día (10 horas de apertura)
+lambda*10
+# Número de coches que acudirán al autolavado y lo encontrarán lleno
+lambda*10*s.mm$Qn[10]
+
+```
+
+
+

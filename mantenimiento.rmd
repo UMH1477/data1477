@@ -1,0 +1,720 @@
+---
+title: "Mantenimiento de máquinas. Estudio de caso"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth : 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r librerias, echo = FALSE, warning = FALSE, message = FALSE}
+# librerías
+library(tidyverse)
+library(simmer)
+library(simmer.plot)
+library(parallel)
+library(diagram)
+```
+
+```{r echo=FALSE}
+# matriz de probabilidades de transición
+matriz.prob.trans<- function(Rmat, ts, cal)
+{
+  # Algoritmo de uniformización para obtener P(t)
+  ################################################
+  
+  # Parámetros de la función
+  # Rmat: matriz de tasas 
+  # ts: instante de tiempo
+  # epsilon: error en la aproximación
+  # cal: forma de obtener r, con dos valores 1 = máximo, 2 = suma finita
+  epsilon <- 1e-05
+  # Paso 2. Cálculo de r
+  ris <- apply(Rmat, 1, sum)
+  rlimit=ifelse(cal == 1, max(ris), sum(Rmat))
+  # Paso 3. Cálculo de hat(P)
+  hatP <- Rmat/rlimit
+  diag(hatP) <- 1 - ris/rlimit
+  # Paso 4. Cálculo de matrices y vectores accesorios
+  rts <- rlimit*ts
+  A <- hatP
+  c <- exp(-rts)
+  B <- c*diag(nrow(Rmat))
+  suma <- c
+  k <- 1
+  # Bucle simulación
+  while(suma < (1- epsilon))
+  {
+    c <- c*rts/k
+    B <- B + c*A
+    A <- A%*%hatP
+    suma <- suma + c
+    k <- k + 1
+  }
+  return(round(B, 4))
+}
+#----------------------------------
+tiempos.ocupacion<- function(Rmat, Ts, cal)
+{
+  # Algortimo de uniformización para obtener M(T)
+  ################################################
+  
+  # Parámetros de la función
+  # Rmat: matriz de tasas
+  # ts: instante de tiempo
+  # epsilon: error en la aproximación
+  # cal: forms de obtener r con dos valores 1 = máximo, 2 = suma
+  epsilon <- 1e-05
+  # Paso 2. Calculo de r
+  ris <- apply(Rmat, 1, sum)
+  rlimit=ifelse(cal == 1, max(ris),sum(Rmat))
+  # Paso 3. Calculo de hat(P)
+  hatP <- Rmat/rlimit
+  diag(hatP) <- 1 - ris/rlimit
+  # Paso 4. 
+  k <- 0
+  A <- hatP
+  # Paso 5.
+  yek <- exp(-1*rlimit*Ts)
+  ygk <- 1 - yek
+  suma <- ygk
+  # Paso 6.
+  B <- ygk*diag(nrow(Rmat))
+  # Bucle simulación
+  cota <- Ts- epsilon
+  while(suma/rlimit < cota)
+  {
+    k <- k + 1
+    yek <- yek*(rlimit*Ts)/k
+    ygk <- ygk - yek
+    B <- B + ygk*A
+    A <- A%*%hatP
+    suma <- suma + ygk
+  }
+  return(round(B/rlimit, 4))
+}
+#-------------------------------------------
+
+# Distribución límite
+# Función para la resolución numérica de las ecuaciones de balance
+distr.lim.general<-function(Rmat)
+{
+  # Parámetros de la función
+  #=========================
+  # Rmat: matriz de tasas del sistema
+  
+  # número de estados del sistema
+  estados <- nrow(Rmat)
+  # Calculamos r_i y lo colocamos en formato matriz
+  sumarows <- diag(apply(Rmat, 1, sum), estados)
+  # Matriz de coeficientes del sistema de ecuaciones de balance
+  A <- t(R)-sumarows
+  # Completamos la matriz añadiendo la restricción de suma de p`s igual a 1
+  A <- rbind(A, rep(1, estados))
+  # Vector de términos independientes del sistema
+  CS <- c(rep(0, estados), 1)
+  # Resolución del sistema
+  ps <- qr.solve(A, CS)
+  return(ps)
+}
+#------------------------------------------
+# distribución límite para procesos de nacimiento-muerte
+# Obtención de distribuciones límite 
+distr.lim.nm <- function(estados, lambdas, mus)
+{
+  # Parámetros de la función
+  # ========================
+  # estados: número de estados del sistema (K)
+  # lambdas: vector de tasas de nacimiento lambda0,..., lambda(K-1)
+  # mus: vector de tasas de muerte mu1,...,muK
+  
+  # definimos vector de rho
+  rhos <- rep(1, estados)
+  # calculamos productos acumulados para lambda y mu
+  prl <- cumprod(lambdas)
+  prm <- cumprod(mus)
+  # rellenamos rho con los productos acumulados
+  rhos[2:estados] <- prl/prm
+  # suma de rhos
+  sumarhos <- sum(rhos)
+  # vector de probabilidades
+  ps <- rhos/sumarhos
+  return(ps)
+}
+# Función para la resolución numérica de los tiempos de primer paso en cmtc
+tiempos.primer.paso<-function(Rmat, A, estados)
+{
+  # Parámetros de la función
+  #=========================
+  # Rmat: matriz de tasas del sistema
+  # A: vector de estados que queremos alcanzar
+  # estados: conjunto de estados total (como carácter)
+  
+  # Estados como texto
+  
+  estados <- as.character(estados)
+  # Tasas r
+  rts <- diag(apply(Rmat, 1, sum), nrow(Rmat))
+  # Seleccionamos el subconjunto de la matriz quitando fila y columna
+  Rmod <- Rmat[-A, -A]
+  rates <- rts[-A, -A]
+  # Número de m´s a estimar
+  lms <- nrow(Rmod)
+  # Matriz de coeficientes del sistema de ecuaciones de balance
+  B <- rates - Rmod
+  # Vector de términos independientes del sistema
+  CS <- rep(1, lms)
+  # Resolución del sistema
+  ps <- as.data.frame(qr.solve(B, CS))
+  rownames(ps) <- paste("estado", estados)[-A]
+  colnames(ps) <-"tiempo"
+  return(ps)
+}
+```
+
+
+
+# Estudio de caso
+
+## Máquinas estropeadas
+Para el proceso de [Mantenimiento de máquinas](#excmtc007) en el que se define $X_t$ como el número de máquinas estropeadas, consideramos cuatro máquinas disponibles y dos operarios para repararlas en caso de fallo, con tiempos de vida de las máquinas exponenciales con media de 3 días ($Exp(\lambda=1/72)$), y tiempos medios de reparación de 2 horas $Exp(\mu=1/2)$.
+Cuando una máquina se estropea es enviada a reparar, y si todos los reparadores están ocupados, queda en cola de espera hasta que uno se desocupe.
+
+**1. Construye la matriz de tasas e interpreta sus elementos. Grafica el sistema.**
+
+El espacio de estados es $S=\{0,1,2,3,4\}$ máquinas estropeadas.
+
+- Cuando hay 0 máquinas estropeadas, la única opción posible es que alguna de las 4 operativas se averíe. Puesto que los tiempos hasta avería de todas ellas son $Exp(\lambda)$, el tiempo hasta el primer fallo será el mínimo de todos ellos, que se distribuye $Exp(4\lambda)$. Así pues, la tasa de avería en este caso, o lo que es lo mismo, de transición al estado 1, es de $r_{01}=4\lambda$.
+- Cuando hay 1 máquina estropeada, podría ponerse en funcionamiento y pasar el sistema al estado 0 con tasa $r_{10}=\mu$,o podría estropearse alguna de las otras 3 que están operativas, con tasa $r_{12}=3\lambda$.
+- Cuando hay 2 máquinas estropeadas, podría ponerse en funcionamiento alguna de ellas con tasa $r_{21}=2\mu$, o estropearse alguna de las otras dos que están operativas, con tasa $r_{23}=2\mu$.
+- Cuando hay 3 máquinas estropeadas, podría ponerse en funcionamiento alguna de las dos que están siendo reparadas (pues sólo hay 2 reparadores) con tasa $r_{32}=2\mu$, o estropearse la otra que queda funcionando, con tasa $r_{34}=\lambda$.  
+- Cuando hay 4 máquinas estropeadas, sólo podría ocurrir que volviera a funcionar alguna de las dos que están siendo reparadas por alguno de los 2 reparadores, con tasa $r_{43}=2\mu$. 
+
+El resto de transiciones no son viables, por lo que su valor es cero. Así la matriz de tasas $R$ resulta: 
+
+```{r estro01}
+# Matriz de tasas
+estados <- c(0, 1, 2, 3, 4)
+nestados <- length(estados)
+
+R <- matrix(nrow = nestados, ncol = nestados, data = 0)
+lambda <- 1/72
+mu <- 1/2 
+
+R[1,2] <- 4*lambda 
+R[2,1] <- mu 
+R[2,3] <- 3*lambda 
+R[3,2] <- 2*mu 
+R[3,4] <- 2*lambda 
+R[4,3] <- 2*mu 
+R[4,5] <- lambda
+R[5,4] <- 2*mu
+round(R,4)
+```
+que deja a la luz que solo son viables las transiciones entre estados colindantes. Se trata pues, de un proceso de nacimiento-muerte, en el que los nacimientos implican averías (incremento del número de máquinas estropeadas) y las muertes representan reparaciones (decrementos del número de máquinas estropeadas). 
+
+El diagrama del proceso viene dado por:
+```{r estro02}
+RR <- matrix(nrow = nestados, ncol = nestados, data = 0)
+RR[1,2] <- "4*lambda"
+RR[2,1] <- "mu" 
+RR[2,3] <- "3*lambda"
+RR[3,2] <- "2*mu"
+RR[3,4] <- "2*lambda"
+RR[4,3] <- "2*mu" 
+RR[4,5] <- "lambda"
+RR[5,4] <- "2*mu"
+pp <- plotmat(t(RR),  pos = 5, curve = 0.5, name = estados,
+              lwd = 1, box.lwd = 2, cex.txt = 0.8,
+              box.type = "circle", box.prop = 0.5, arr.type = "triangle",
+              arr.pos = 0.55, self.cex = 0.6,  
+              shadow.size = 0.01, prefix = "", endhead = FALSE, main = "")
+```
+**2. Cuando hay dos máquinas estropeadas, ¿cuánto tiempo pasa hasta que se estropea otra? Y cuando hay 3, ¿cuánto tiempo transcurre hasta que vuelve a funcionar una de ellas?**
+
+Respondemos con las inversas a las tasas de transición (1) del estado 2 al estado 3, $1/r_{23}=$`r round(1/R[3,4])` y (2) del estado 3 al estado 2 $1/r_{32}=$`r round(1/R[4,3])`.
+
+**3. Cuando se estropean dos máquinas, ¿por cuánto tiempo permanecen estropeadas? Cuando están todas funcionando, ¿por cuánto tiempo no se estropea ninguna?**
+
+Nos preguntan por los tiempos medios de permanencia en el estado 2 (2  máquinas operativas), $1/r_2$, y en el estado 0 (todas las máquinas operativas), $1/r_0$. Estos tiempos medios de permanencia son los inversos a las tasas de permanencia, dado que todos los tiempos en el proceso son exponenciales. Las tasas de permanencia se calculan sumando las tasa de transición por filas.
+$$r_i=\sum_{j=1}^{N} r_{ij}.$$
+Así tendremos:
+
+\begin{eqnarray*}
+r_0 &=& r_{01} \\
+r_1 &=& r_{10}+r_{12} \\
+r_2 &=& r_{21}+r_{23} \\
+r_3 &=& r_{32}+r_{34} \\
+r_4 &=& r_{43}
+\end{eqnarray*}
+
+```{r estro03}
+cat("Tasas de permanencia ")
+permanencia = apply(R,1,sum); permanencia
+cat("\n Tiempos de permanencia ")
+tiempos.permanencia=1/permanencia; tiempos.permanencia
+```
+
+Para responder las cuestiones, usamos pues estos tiempos esperados de permanencia. Cada vez que el sistema llega al estado 0 con todas las máquinas operativas, permanece allí, sin que se estropee ninguna, por término medio `r round(tiempos.permanencia[1],1)` horas. Cuando llega a tener sólo 2 máquinas operativas tarda, por término medio `r round(tiempos.permanencia[3],1)` horas en cambiar de estado.
+
+
+**4. Si están estropeadas 3 máquinas, ¿cuál es la probabilidad de que a continuación se estropee una más? ¿Y la de que se arregle una de las dos que están reparando?**
+
+Contestamos con las probabilidades de salto $p_{34}$ y $p_{32}$ respectivamente. Puesto que conocemos las tasas de transición y las de permanencia, calculamos las probabilidades de salto utilizando la relación entre ellas,
+$$p_{ij}=r_{ij}/r_i$$
+
+```{r}
+psalto <- R/permanencia;
+psalto
+```
+Así respondemos que la probabilidad de que se estropee otra máquina cuando tenemos 3 máquinas estropeadas es de `r psalto[4,5]` y la probabilidad de que una de las que están arreglando vuelva a funcionar es de `r psalto[4,3]`.
+
+**5. Si el sistema está con todas las máquinas operativas, ¿cuál es la probabilidad de que se estropee una? ¿Y de que se estropee más de una?**
+
+Cuando todas las máquinas están operativas, no hay ninguna estropeada, luego la probabilidad de que se estropee una será $p_{01}=$`r psalto[1,2]`. La probabilidad de que se estropee más de una es cero, pues sólo es posible la transición del estado 0 al estado 1.
+
+**6. Si la fábrica inició la semana con todas las máquinas operativas, ¿cuál es la probabilidad de que transcurridas 8 horas tengamos todas las máquinas en funcionamiento? ¿Y la probabilidad de que tengamos dos máquinas estropeadas? ¿Y la de que tengamos a los dos reparadores ocupados?**
+
+Respondemos con las probabilidades de transición en $t=8$ horas que transcurren desde el momento inicial, y en concreto por: ninguna estropeada $p_{00}(t)$, dos estropeadas $p_{02}(t)$ y al menos dos estropeadas $p_{02}+p_{03}+p_{04}$ respectivamente. Para obtener la matriz de probabilidades de transición hemos de utilizar la aproximación basada en el método de uniformización, programada en la función `matriz.prob.trans(R, t, 1)`.
+
+```{r}
+t=8
+ptransi <- matriz.prob.trans(R, t, 1)
+ptransi
+cat("\n Pr[X(8)=0|X(0)=0]",round(ptransi[1,1],3))
+cat("\n Pr[X(8)=2|X(0)=0]",round(ptransi[1,3],3))
+cat("\n Pr[X(8)>=2|X(0)=0]",round(sum(ptransi[1,3:5]),3))
+
+```
+
+**7. Si la fábrica inició la semana con todas las máquinas operativas, ¿cuál es la probabilidad de que al inicio de la semana siguiente tengamos todas las máquinas en funcionamiento? ¿Y al cabo de las dos semanas?**
+
+Podemos resolver de nuevo utilizando la matriz de probabilidades de transición, y en particular $p_{00}(t)$ con $t=24*7$ y $t=24*14$ respectivamente, o podemos utilizar la aproximación a largo plazo, esto es, directamente la distribución estacionaria. Comprobamos que los resultados son similares, pues al cabo de una semana la distribución de la cadena ya ha llegado a la estacionariedad; de hecho, todas las filas son similares, pues el proceso ha "olvidado" dónde se inició. 
+
+Para obtener la distribución estacionaria podemos utilizar la función `distr.lim.nm(estados, lambdas, mus)` dado que se trata de un proceso de nacimiento-muerte, o la función genérica `distr.lim.general(Rmat)`.
+
+```{r}
+# Probabilidades de transición
+t=24*7
+matriz.prob.trans(R, t, 1)
+t=24*7
+round(matriz.prob.trans(R, t, 1),4)
+# Distribución estacionaria
+round(distr.lim.general(R),4)
+
+# Distribución estacionaria para nacimiento-muerte
+lambdas=4:1*lambda
+mus=c(1,2,2,2)*mu
+round(distr.lim.nm(5,lambdas,mus),4)
+```
+
+**8. Si la fábrica inició la semana con todas las máquinas operativas y ha estado funcionando durante 8 horas consecutivas, ¿cuánto tiempo ha tenido todas las máquinas operativas? ¿Cuánto tiempo ha estado ocupado sólo un reparador? ¿Cuánto tiempo han estado ocupados los dos reparadores?**
+
+Respondemos con la matriz de los tiempos de ocupación, que obtenemos a través de la función `tiempos.ocupacion()`, que implementa el método de uniformización para aproximarla mediante una suma finita. Puesto que nos dan el estado inicial, $X_0=0$, o lo que es lo mismo, todas las máquinas funcionando, nos fijaremos en la primera fila de la matriz; para responder la primera cuestión consideramos el tiempo transcurrido, $t=8$, y el estado al que alude: $X=0$, es decir, $m_{00}(t)$.
+
+Para saber cuánto tiempo ha estado ocupado sólo un reparador, lo relacionamos con el número de máquinas estropeadas. Esto habrá ocurrido cuando sólo una máquina esté averiada, esto es, $X=1$, y la solución será $m_{01}(t)$.
+
+Por último, los dos reparadores habrán estado ocupados cuando hayan tenido 2, 3 o 4 máquinas estropeadas, luego el tiempo total de ocupación será la suma de los tiempos de ocupación de estos estados, esto es, $m_{02}(t)+m_{03}(t)+m_{04}(t)$.
+
+```{r}
+t=8
+tocupa=tiempos.ocupacion(R,t,1)
+cat("\n Tiempo con todas las máquinas funcionando: ",tocupa[1,1],"horas.")
+cat("\n Tiempo con todas 1 máquina estropeada=Tiempo con sólo un reparador ocupado ",tocupa[1,2],"horas.")
+cat("\n Tiempo con los dos reparadores ocupados=Tiempo con al menos 2 máquinas estropeadas: ",sum(tocupa[1,3:5]),"horas.")
+```
+
+**9. Si la fábrica inició la semana con todas las máquinas operativas y ha estado funcionando durante 8 horas consecutivas, ¿qué fracción del tiempo ha tenido todas las máquinas operativas? ¿Qué fracción de su jornada laboral de 8 horas ha estado ocupado el reparador1, que es el primero en asumir las reparaciones cuando hay una avería? ¿Cuál es el aprovechamiento total de los dos reparadores durante una jornada laboral? ¿Cuánto sueldo podríamos haber ahorrado?**
+
+Utilizamos los resultados que obtuvimos en el apartado anterior, y respondemos en términos de fracciones.
+
+Si durante $T=8$ horas la fábrica tuvo todas las máquinas funcionando durante $t=$`r tocupa[1,1]` horas, esto representa una fracción de $t/T$ sobre el total de horas de funcionamiento, esto es, `r round(tocupa[1,1]/t,4)`, o lo que es lo mismo: el  `r round(tocupa[1,1]/t*100,2)`% del tiempo de funcionamiento, la fábrica tuvo todas sus máquinas operativas.
+
+Las otras cuestiones las resolvemos de modo similar.
+
+En el periodo de $T=8$ horas, el reparador1 ha estado ocupado siempre que al menos haya habido una avería, tiempo que cuantificamos con la suma de los tiempos de ocupación $t=\sum_{j=1}^4 m_{0j}$. Si asumimos que su jornada de trabajo corresponde justamente a ese periodo, la proporción de su jornada de trabajo que ha estado ocupado es $t/T$, esto es, 
+```{r}
+t=8
+tocupa=tiempos.ocupacion(R,t,1)
+repara1=sum(tocupa[1,2:5])
+cat("Proporción de jornada de trabajo del reparador1 que ha trabajado:",round(repara1/t,4))
+```
+
+
+
+Para responder la última pregunta, el tiempo de trabajo total dedicado a reparaciones por los dos reparadores será igual al tiempo en que la fábrica sólo ha tenido una máquina averiada, periodo en el que ha trabajado sólo un reparador, más el tiempo en que la fábrica ha tenido dos o más máquinas averiadas, periodo en el cual han trabajado los dos reparadores. El tiempo total de trabajo de los dos trabajadores es $T=8 \cdot 2$ horas, juntando sus dos jornadas laborales.
+El tiempo total de trabajo efectivo  de los dos trabajadores será
+$$t=m_{01}(8)+2 \cdot [m_{02}(8)+m_{03}(8)+m_{04}(8)]$$
+que dividido por el tiempo que suman las dos jornadas laborales, $t/T$, nos da:
+```{r}
+reparaciones<-tocupa[1,2]+2*sum(tocupa[1,3:5])
+cat("\n Tiempo de trabajo acumulado por los dos reparadores:", reparaciones,"horas")
+cat("\n % del tiempo pagado a los 2 reparadores que ha sido tiempo efectivo de trabajo:",round(reparaciones/(2*t)*100,2),"%")
+cat("\n % del sueldo que podríamos haber ahorrado:",round((1-reparaciones/(2*t))*100,2),"%")
+```
+
+**10. ¿Cuántas máquinas esperamos que estén operativas cuando hayan transcurrido 8 horas desde el inicio de la jornada, si se empezó con todas las máquinas operativas?**
+
+Puesto que $X_8$ representa el número de máquinas estropeadas después de 8 horas, $4-X_8$ será el número de máquinas funcionando después de 8 horas. Nos preguntan pues, por $4-E[X_8|X_0=0]$, valor esperado que podemos calcular con las probabilidades de transición $p_{0j}(8)$, esto es,
+$$E[X_8|X_0=0]=\sum_{j=0}^4 j \cdot p_{0j}(8).$$
+```{r}
+t=8
+ptransi <- matriz.prob.trans(R, t, 1)
+estados<-0:4
+estro8=ptransi[1,]%*%estados; estro8
+cat("Núm.Esperado de máquinas funcionando tras 8 horas:",4-estro8)
+```
+
+**11. Si la fábrica inició la semana con todas las máquinas operativas y ha estado funcionando durante una semana entera, ¿cuánto tiempo ha tenido todas las máquinas operativas? ¿Qué fracción del tiempo ha tenido todas las máquinas operativas? En general, ¿qué porcentaje del tiempo de trabajo en la fábrica están todas las máquinas operativas?**
+
+Podemos responder a esta pregunta reproduciendo el resultado en apartados previos, con los tiempos de ocupación, y en particular con $m_{00}(t)$ para $t=24 \cdot 7$. Sin embargo, puesto que una semana se considera mucho tiempo, el comportamiento que observemos se parecerá mucho al comportamiento a largo plazo del proceso, es decir, los tiempos que nos piden provendrán de la "distribución de ocupación del proceso", que coincide con la distribución límite y con la distribución estacionaria $p=(p_0,p_1,...,p_4)$, y en particular de $p_0$. Comprobemos que los resultados son similares. La distribución estacionaria la obtenemos con la función `distr.lim.general()` que resuelve las ecuaciones de balance.
+
+```{r}
+# tiempos de ocupación
+t=24*7
+tocupa=tiempos.ocupacion(R,t,1)[1,];tocupa
+cat("\n Tiempo con todas las máquinas funcionando en una semana: ",round(tocupa[1],2),"=",round(tocupa[1]/t*100,2),"%")
+# distribución límite
+p.estacionaria=round(distr.lim.general(R),4)
+cat("\n Tiempo con todas las máquinas funcionando en cualquier periodo a largo plazo: ",round(p.estacionaria[1]*100,2),"%")
+```
+
+**12. Si sabemos que cada minuto que una máquina está averiada genera unos costes de 1€ y cuando está operativa genera unos beneficios de 5€/hora, ¿cuánto gana la empresa en una jornada de 8 horas si esta empieza con todas las máquinas funcionando? No considerar el sueldo de los reparadores (y por lo tanto el coste de cada reparación).**
+
+Los beneficios esperados acumulados durante un periodo de $T=8$ horas, sin considerar el sueldo de los reparadorees, los cuantificamos con la fórmula 
+$$g(T)=m(T) \cdot c,$$
+donde $m(T)$ es la matriz de ocupación y $c$ una matriz columna con los beneficios incurridos en cada estado por unidad de tiempo, por avería y funcionamiento.
+
+```{r}
+coste.hora=1*60
+beneficio.hora=5
+beneficios=(4:0)*beneficio.hora-(0:4)*coste.hora; beneficios
+t=8
+g=tiempos.ocupacion(R,t,1) %*% matrix(beneficios,ncol=1);g
+cat("Beneficio esperado de una jornada de 8 horas empezando con todas las máquinas operativas (sin reparadores):",round(g[1,],2),"€")
+```
+
+**13. Tras un estudio realizado se ha comprobado que el 89.7% de las semanas se inician con todas las máquinas operativas, el 9.88% con una máquina estropeada, el 0.41% con 2 máquinas estropeadas, el 0.01% con 3 máquinas estropeadas y el 0% con las cuatro máquinas estropeadas.  ¿Cuánto gana la empresa en una jornada cualquiera de 8 horas?**
+
+Nos preguntan por el beneficio esperado acumulado en 8 horas, considerando la incertidumbre existente sobre cómo se iniciará una jornada cualquiera de 8 horas, y representada por la distribución inicial $p_0(0),p_1(0),..., p_4(0)$, que se da en el enunciado. Así la respuesta la obtenemos con:
+$$E[g(t)]=\sum_{j=0}^4 g(j,t) p_j(0)$$
+```{r}
+pini=c(89.7,9.88,0.41,0.01,0)/100
+coste.medio=t(g) %*% pini
+cat("Beneficio esperado total de una jornada cualquiera de 8 horas (sin reparadores):",round(coste.medio,2),"€")
+```
+
+
+**14. Con los mismos costes especificados previamente para los tiempos de avería y de funcionamiento,**
+
+  **a) ¿cuál será la ganancia esperada por hora para la empresa, sin considerar el sueldo de los reparadores?**
+  **b) Si se añade el coste del sueldo de los dos reparadores, esto es 2000€/mes, ¿cuánto gana la empresa actualmente?**
+  **c) ¿Qué pasaría si los costes por unidad de tiempo que está averiada una máquina se duplicaran respecto de la situación actual? ¿Qué sueldos recomendarías a la empresa para garantizar unos beneficios de al menos el 50% de las ganancias que se generan por la producción?**
+
+Para responder la primera pregunta multiplicamos los beneficios por la distribución estacionaria, pues es la que regula el funcionamiento del sistema a largo plazo.
+```{r}
+coste.hora=1*60
+beneficio.hora=5
+beneficios=(4:0)*beneficio.hora-(0:4)*coste.hora
+g=beneficios%*%distr.lim.general(R)
+cat("Beneficio hora (sin reparadores):",round(g,2),"€")
+cat("\n Beneficio mes (sin reparadores):",round(g*30*24,2),"€")
+```
+
+Pagar dos sueldos mensuales de 2000€, implica detraer esos sueldos a las ganancias conseguidas, esto es, 
+```{r}
+cat("\n Beneficio mes (con reparadores):",round(g*30*24-4000,2),"€")
+```
+
+Si los costes por tiempo averiado se duplicaran, las ganancias de la empresa serían
+```{r}
+coste.hora=2*60
+beneficio.hora=5
+beneficios=(4:0)*beneficio.hora-(0:4)*coste.hora
+g=beneficios%*%distr.lim.general(R)
+cat("Beneficio hora (sin reparadores):",round(g,2),"€")
+cat("\n Beneficio mes (sin reparadores):",round(g*30*24,2),"€")
+cat("\n Beneficio mes (con reparadores):",round(g*30*24-4000,2),"€")
+```
+
+Así, si queremos garantizar a la empresa unas ganancias al menos del 70% de las ganancias que genera la producción, los sueldos de los dos operarios debería ser
+```{r}
+ganancias.produccion.mes = g*30*24
+cat("\n Beneficio mes (sin reparadores):",round(ganancias.produccion.mes,2),"€")
+sueldo.reparador=0.3*ganancias.produccion.mes/2
+cat("\n Sueldo recomendado operador/mes:",round(sueldo.reparador,2))
+```
+
+**15. Si la fábrica inicia con todas las máquinas operativas, ¿cuánto tiempo pasará hasta que hayan de trabajar simultáneamente los dos operadores?**
+
+Para que trabajen simultáneamente los dos operadores, el número de máquinas estropeadas habrá de ser al menos de 2, pero también podría ser 3 o 4. Calculemos pues, los tiempos de primer paso desde el estado 0 hasta los estados 2, 3 y 4.
+
+```{r}
+A=3:5 # corresponde a las filas que identifican los estados 2, 3,4
+estados=0:4
+primer.paso=tiempos.primer.paso(R,A,estados)
+cat("Trancurren",round(primer.paso[1,],1),"horas hasta que los dos reparadores trabajan a la vez, esto es,",round(primer.paso[1,]/24,1),"días.")
+```
+
+
+## Simulación de máquinas estropeadas
+Para simular el sistema hemos de considerar que tenemos 4 máquinas idénticas que cuando se averían han de ser reparadas hasta volver a estar operativas y, en consecuencia, poder volver a estropearse. Es preciso pues, diferenciar las 4 máquinas y utilizar activadores y desactivadores que avisen al sistema de simulación de que están estropeadas o vuelven a estar operativas de nuevo (y por lo tanto ya se puede producir otra avería).
+
+```{r}
+# Sistema Xt=máquinas estropeadas
+#################################################
+mantenimiento.estrop <- function(t, lambda, mu, nrepara,nmaquinas)
+{
+  env=simmer()
+  # lambda: tasa de averías
+  # mu: tasa de reparación
+  # nrepara: nºreparadores
+  # nmáquinas: nº máquinas
+
+  reparacion <- function(i){
+    trajectory() %>%
+    # mientras reparo la máquina i no se puede producir otro fallo
+    deactivate(paste0("maq",i,"_"))%>%
+      # asigno un reparador
+    seize("mecanico",1) %>%
+    # tiempos de reparación 
+    timeout(function() rexp(1,mu)) %>%
+      # una vez reparada la máquina i aviso que ya puede volver a fallar
+    activate(paste0("maq",i,"_")) %>%
+      # libero al reparador
+    release("mecanico")}
+
+# simulación de averías para K máquinas
+for(i in 1:nmaquinas) env %>%
+    #etiqueto cada máquina con un índice 1234 y simulo averías
+    add_generator(paste0("maq",i,"_"),reparacion(i),function() rexp(1,lambda)) 
+    
+env %>%  
+  add_resource("mecanico", capacity = nrepara)%>%
+  run(until = t)     
+}
+```
+
+
+Simulamos estado estacionario proyectando una cadena de simulación larga
+```{r}
+lambda <- 1/72
+mu <- 1/2 
+t=10000 # tiempo de simulación
+nrepara=2
+nmaquinas=4
+sim=mantenimiento.estrop(t,lambda,mu,nrepara,nmaquinas)
+head(get_mon_arrivals(sim))
+head(get_mon_resources(sim))
+
+# Uso de un recurso (usage): gráfico de líneas con el uso promedio acumulado del recurso a lo largo de la simulación.
+# uso del servicio de reparación
+plot(get_mon_resources(sim),metric="usage",names="mecanico",items="system")
+# uso de la cola
+plot(get_mon_resources(sim),metric="usage",names="mecanico",items="queue")
+# uso de los reparadores 
+plot(get_mon_resources(sim),metric="usage",names="mecanico",items="server")
+
+# Utilización de un recurso (utilization): barplot con la utilización promedio del recurso: (tiempo total en uso)/(tiempo total de simulación)
+# utilización (%) de los reparadores
+plot(get_mon_resources(sim),metric="utilization",names="mecanico")
+
+# Tiempos de actividad de las máquinas (tiempo efectivo de reparación)
+plot(get_mon_arrivals(sim),metric="activity_time")
+# tiempos de espera en cola (hasta ser reparado)
+plot(get_mon_arrivals(sim),metric="waiting_time")
+# tiempo que permanece en el sistema: está estropeado (en reparación o en espera)
+plot(get_mon_arrivals(sim),metric="flow_time")
+```
+
+**0.1 Aproximar por simulación el número esperado de máquinas en funcionamiento al cabo de 8 horas si la fábrica empieza con todas las máquinas operativas**
+
+
+Hemos de simular varias réplicas del funcionamiento de la fábrica iniciando con todas ellas operativas. Puesto que el algoritmo parte de dicho supuesto (inicialmente se simulan 4 tiempos de avería), procedemos sin más. Luego contabilizaremos el estado final del sistema al cabo de las 8 horas y sacaremos un promedio con todas las réplicas.
+
+```{r}
+lambda <- 1/72
+mu <- 1/2 
+t=8 # tiempo de simulación
+nrepara=2
+nmaquinas=4
+nreplicas=1000
+
+sim=mclapply(1:nreplicas, function(i){
+   mantenimiento.estrop(t, lambda,mu, nrepara,nmaquinas)%>%
+    wrap()},mc.set.seed=FALSE)
+sim.arr<-as_tibble(get_mon_arrivals(sim))
+# almacenamos análisis de recursos del sistema
+sim.res<-as_tibble(get_mon_resources(sim))
+
+operativas=sim.res %>%
+  group_by(replication) %>%
+  summarize(n=4-tail(system,1))
+m=mean(operativas$n)
+error=sd(operativas$n)/sqrt(nreplicas)
+cat("\n Máquinas operativas después de 8 horas: ",m,"(error=",error,")")
+```
+
+
+
+
+**0.2 Aproximar por simulación la probabilidad a largo plazo de que todas las máquinas estén en funcionamiento**
+
+Simulamos el sistema durante un periodo muy largo y extraemos conclusiones a partir de la aproximación de la distribución estacionaria con todas las simulaciones obtenidas, calculando los tiempos de permanencia en el estado 0 y dividiéndolo por el tiempo total de funcionamiento.
+```{r}
+# tiempo de funcionamiento del sistema
+t=1000
+set.seed(123)
+sim=mantenimiento.estrop(t, lambda,mu, nrepara,nmaquinas)
+sim.res=get_mon_resources(sim)
+
+# construimos un data.frame con los estados por los que ha pasado el sistema, y el tiempo que ha estado en cada uno de ellos
+estados=c(0,sim.res$system)
+periodos=diff(c(0,sim.res$time,t))
+estados.sim=data.frame(estados,periodos)
+
+# y ahora calculamos probabilidades sumando los tiempos en cada estado y dividiendo por t
+p=vector()
+for(i in 0:4){
+  p[i+1]=sum(estados.sim$periodos[estados.sim$estados==i])/t
+}
+# la distribución estacionaria es 
+p
+cat("\n Tiempo que han funcionado simultáneamente todas las máquinas: ",p[1])
+```
+
+Sin embargo, como hacemos la estimación con una única cadena, no podemos calcular el error asociado a dicha probabilidad. Para calcularlo tendríamos que replicar muchas veces (nreplicas) y calcular en cada réplica estas probabilidades, para con ellas obtener la estimación MC y su error. Calculemos exclusivamente la aproximación a $p_0$.
+
+```{r}
+# tiempo de funcionamiento del sistema
+t=500 # tiempo total simulado
+nreplicas=500 # número de réplicas
+sim=mclapply(1:nreplicas, function(i){
+   mantenimiento.estrop(t, lambda,mu, nrepara,nmaquinas)%>%
+    wrap()},mc.set.seed=FALSE)
+# almacenamos análisis de recursos del sistema
+sim.res<-as_tibble(get_mon_resources(sim))
+
+# tiempo en funcionamiento de todas las máquinas a la vez
+p0=vector()
+for(i in 1:nreplicas){
+ sim.sel=sim.res[sim.res$replication==i,] 
+ estados=c(0,sim.sel$system)
+ periodos=diff(c(0,sim.sel$time,t))
+ estados.sim=data.frame(estados,periodos)
+ p0[i]=sum(estados.sim$periodos[estados.sim$estados==0])/t
+}
+
+p0.m=mean(p0)*100
+p0.error=sd(p0)/sqrt(nreplicas)*100
+# Ya obtenemos la estimación MC y su error
+cat("\n Tiempo que han funcionado simultáneamente todas las máquinas: ",round(p0.m,2),"% (error=",round(p0.error,2),"%).")
+```
+
+
+
+**0.3 Aproximar por simulación la fracción del tiempo de funcionamiento del sistema en que los dos operarios están ocupados a la vez.**
+Esto corresponderá a la fracción del tiempo en que han habido 2, 3 o 4 máquinas estropeadas. Utilizamos las simulaciones anteriores para el largo plazo y aproximamos esas proporciones.
+
+```{r}
+p=vector()
+for(i in 1:nreplicas){
+ sim.sel=sim.res[sim.res$replication==i,] 
+ estados=c(0,sim.sel$system)
+ periodos=diff(c(0,sim.sel$time,t))
+ estados.sim=data.frame(estados,periodos)
+ p[i]=sum(estados.sim$periodos[estados.sim$estados>1])/t
+}
+
+p.m=mean(p)*100
+p.error=sd(p)/sqrt(nreplicas)*100
+# Ya obtenemos la estimación MC y su error
+cat("\n Tiempo que han estado ocupados simultáneamente los dos reparadores: ",round(p.m,2),"% (error=",round(p.error,2),"%).")
+```
+**1-15 Aproxima por simulación todas las preguntas que hemos resuelto utilizando los resultados teóricos de las CMTC y compara la calidad de las aproximaciones de la simulación.**
+
+## Máquinas operativas
+
+Para el proceso de [Mantenimiento de máquinas](#excmtc007) en el que se define $X_t$ como el número de máquinas en funcionamiento, consideramos cuatro máquinas disponibles y dos operarios para repararlas en caso de fallo, con tiempos de vida de las máquinas exponenciales con media de 3 días ($Exp(\lambda=1/72)$), y tiempos medios de reparación de 2 horas $Exp(\mu=1/2)$.
+
+1. Estamos interesados en calcular el valor esperado del número de máquinas en funcionamiento después de 8 horas de funcionamiento, suponiendo que el sistema empieza con todas las máquinas paradas.
+2. La probabilidad a largo plazo de que todas las máquinas estén en funcionamiento,
+3. La fracción de tiempo a largo plazo que los dos operarios están ocupados.
+
+
+- Cuando hay 0 máquinas en funcionamiento, la única opción posible es que alguna de las 2 que están siendo reparadas (pues sólo hay 2 reparadores aunque las 4 están estropeadas) se ponga en marcha, esto es, termine de ser reparada. Puesto que la tasa de reparación es $\mu$, la transición al estado 1 vendrá definida por el mínimo tiempo que transcurra hasta que termine una de las 2 reparaciones, que tendrá una distribución $Exp(2\mu)$. Así pues, la tasa de transición de 0 a 1 es de $2\mu$.
+- Cuando hay 1 máquina en funcionamiento, podría averiarse y pasar al estado 0 con tasa $\lambda$ o podría ponerse en marcha alguna de las dos que están siendo reparadas, con tasa $2\mu$.
+- Cuando hay 2 máquinas en funcionamiento, podría averiarse una de ellas, con tasa $2\lambda$ o ponerse en marcha alguna de las dos que están siendo reparadas, con tasa $2\mu$.
+- Cuando hay 3 máquinas en funcionamiento, podría averiarse una de ellas, con tasa $3\lambda$ o ponerse en marcha alguna de las dos que están siendo reparadas, con tasa $\mu$.
+- Cuando hay 4 máquinas en funcionamiento, sólo podría averiarse una de ellas, con tasa $4\lambda$.
+
+Así la matriz de tasas $R$ resulta: 
+```{r oper01}
+# Matriz de tasas
+estados <- c(0, 1, 2, 3, 4)
+nestados <- length(estados)
+
+R <- matrix(nrow = nestados, ncol = nestados, data = 0)
+mu <- 1/2 # tasa reparación
+lambda <- 1/72  # tasa funcionamiento
+
+R[1,2] <- 2*mu
+R[2,1] <- lambda 
+R[2,3] <- 2*mu
+R[3,2] <- 2*lambda
+R[3,4] <- 2*mu
+R[4,3] <- 3*lambda 
+R[4,5] <- mu
+R[5,4] <- 4*lambda
+```
+
+```{r}
+RR <- matrix(nrow = nestados, ncol = nestados, data = 0)
+RR[1,2] <- "2*mu"
+RR[2,1] <- "lambda" 
+RR[2,3] <- "2*mu"
+RR[3,2] <- "2*lambda"
+RR[3,4] <- "2*mu"
+RR[4,3] <- "3*lambda" 
+RR[4,5] <- "mu"
+RR[5,4] <- "4*lambda"
+pp <- plotmat(t(RR),  pos = 5, curve = 0.5, name = estados,
+              lwd = 1, box.lwd = 2, cex.txt = 0.8,
+              box.type = "circle", box.prop = 0.5, arr.type = "triangle",
+              arr.pos = 0.55, self.cex = 0.6,  
+              shadow.size = 0.01, prefix = "", endhead = FALSE, main = "")
+```
+Resolvemos (1). Para calcular el valor esperado del número de máquinas en funcionamiento tras 9 horas de funcionamiento,calculamos la matriz de probabilidades de transición para tener la distribución de transición en 9 horas arrancando de 4 máquinas paradas.
+```{r}
+# Matriz de probabilidades de transición
+Pmat<-matriz.prob.trans(R, 9, 1);Pmat
+# Distribución de probabilidad cuando arranca de todas estropeadas
+Pmat[1,]
+# valor esperado
+esperanza <- round(sum(estados*Pmat[1,]), 1)
+cat("E[X(9)]=Nº esperado de máquinas estropeadas tras 9 horas=",round(esperanza,2))
+```
+
+Resolvemos (2). La probabilidad a largo plazo se obtiene con la distribución estacionaria. La probabilidad de que todas estén operativas es $p_4$.
+```{r}
+estacionaria=distr.lim.general(R); estacionaria
+cat("p_4=Probabilidad todas las máquinas operativas=",round(estacionaria[5],3))
+```
+
+Puesto que se trata de un proceso de nacimiento-muerte también lo podemos resolver con la función específica `distr.lim.nm`.
+```{r oper02}
+lambdas <- c(rep(2*mu,3),mu)
+mus <- (1:4)*lambda
+distr.lim.nm(nestados, lambdas, mus)
+```
+
+Resolvemos (3). Para calcular la fracción del tiempo que los dos operarios están ocupados utilizamos la distribución de ocupación, o lo que es lo mismo, la distribución estacionaria. Los dos estarán ocupados a la vez cuando el número de máquinas operativas sea de 0, 1 o 2.
+```{r}
+ocupados=sum(estacionaria[1:3])*100
+cat("Porcentaje del tiempo con los dos reparadores ocupados=",round(ocupados,3),"%")
+```
+
+

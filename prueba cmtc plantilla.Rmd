@@ -1,0 +1,215 @@
+---
+title: "Plantilla Prueba CMTC"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r librerias, echo = FALSE, warning = FALSE, message = FALSE}
+# librerías
+library(tidyverse)
+library(simmer)
+library(simmer.plot)
+library(parallel)
+library(diagram)
+```
+
+```{r echo=FALSE}
+# matriz de probabilidades de transición
+matriz.prob.trans<- function(Rmat, ts, cal)
+{
+  # Algoritmo de uniformización para obtener P(t)
+  ################################################
+  
+  # Parámetros de la función
+  # Rmat: matriz de tasas 
+  # ts: instante de tiempo
+  # epsilon: error en la aproximación
+  # cal: forma de obtener r, con dos valores 1 = máximo, 2 = suma finita
+  epsilon <- 1e-05
+  # Paso 2. Cálculo de r
+  ris <- apply(Rmat, 1, sum)
+  rlimit=ifelse(cal == 1, max(ris), sum(Rmat))
+  # Paso 3. Cálculo de hat(P)
+  hatP <- Rmat/rlimit
+  diag(hatP) <- 1 - ris/rlimit
+  # Paso 4. Cálculo de matrices y vectores accesorios
+  rts <- rlimit*ts
+  A <- hatP
+  c <- exp(-rts)
+  B <- c*diag(nrow(Rmat))
+  suma <- c
+  k <- 1
+  # Bucle simulación
+  while(suma < (1- epsilon))
+  {
+    c <- c*rts/k
+    B <- B + c*A
+    A <- A%*%hatP
+    suma <- suma + c
+    k <- k + 1
+  }
+  return(round(B, 4))
+}
+#----------------------------------
+tiempos.ocupacion<- function(Rmat, Ts, cal)
+{
+  # Algortimo de uniformización para obtener M(T)
+  ################################################
+  
+  # Parámetros de la función
+  # Rmat: matriz de tasas
+  # ts: instante de tiempo
+  # epsilon: error en la aproximación
+  # cal: forms de obtener r con dos valores 1 = máximo, 2 = suma
+  epsilon <- 1e-05
+  # Paso 2. Calculo de r
+  ris <- apply(Rmat, 1, sum)
+  rlimit=ifelse(cal == 1, max(ris),sum(Rmat))
+  # Paso 3. Calculo de hat(P)
+  hatP <- Rmat/rlimit
+  diag(hatP) <- 1 - ris/rlimit
+  # Paso 4. 
+  k <- 0
+  A <- hatP
+  # Paso 5.
+  yek <- exp(-1*rlimit*Ts)
+  ygk <- 1 - yek
+  suma <- ygk
+  # Paso 6.
+  B <- ygk*diag(nrow(Rmat))
+  # Bucle simulación
+  cota <- Ts- epsilon
+  while(suma/rlimit < cota)
+  {
+    k <- k + 1
+    yek <- yek*(rlimit*Ts)/k
+    ygk <- ygk - yek
+    B <- B + ygk*A
+    A <- A%*%hatP
+    suma <- suma + ygk
+  }
+  return(round(B/rlimit, 4))
+}
+#-------------------------------------------
+
+# Distribución límite
+# Función para la resolución numérica de las ecuaciones de balance
+distr.lim.general<-function(Rmat)
+{
+  # Parámetros de la función
+  #=========================
+  # Rmat: matriz de tasas del sistema
+  
+  # número de estados del sistema
+  estados <- nrow(Rmat)
+  # Calculamos r_i y lo colocamos en formato matriz
+  sumarows <- diag(apply(Rmat, 1, sum), estados)
+  # Matriz de coeficientes del sistema de ecuaciones de balance
+  A <- t(R)-sumarows
+  # Completamos la matriz añadiendo la restricción de suma de p`s igual a 1
+  A <- rbind(A, rep(1, estados))
+  # Vector de términos independientes del sistema
+  CS <- c(rep(0, estados), 1)
+  # Resolución del sistema
+  ps <- qr.solve(A, CS)
+  return(ps)
+}
+#------------------------------------------
+# distribución límite para procesos de nacimiento-muerte
+# Obtención de distribuciones límite 
+distr.lim.nm <- function(estados, lambdas, mus)
+{
+  # Parámetros de la función
+  # ========================
+  # estados: número de estados del sistema (K)
+  # lambdas: vector de tasas de nacimiento lambda0,..., lambda(K-1)
+  # mus: vector de tasas de muerte mu1,...,muK
+  
+  # definimos vector de rho
+  rhos <- rep(1, estados)
+  # calculamos productos acumulados para lambda y mu
+  prl <- cumprod(lambdas)
+  prm <- cumprod(mus)
+  # rellenamos rho con los productos acumulados
+  rhos[2:estados] <- prl/prm
+  # suma de rhos
+  sumarhos <- sum(rhos)
+  # vector de probabilidades
+  ps <- rhos/sumarhos
+  return(ps)
+}
+# Función para la resolución numérica de los tiempos de primer paso en cmtc
+tiempos.primer.paso<-function(Rmat, A, estados)
+{
+  # Parámetros de la función
+  #=========================
+  # Rmat: matriz de tasas del sistema
+  # A: vector de estados que queremos alcanzar
+  # estados: conjunto de estados total (como carácter)
+  
+  # Estados como texto
+  
+  estados <- as.character(estados)
+  # Tasas r
+  rts <- diag(apply(Rmat, 1, sum), nrow(Rmat))
+  # Seleccionamos el subconjunto de la matriz quitando fila y columna
+  Rmod <- Rmat[-A, -A]
+  rates <- rts[-A, -A]
+  # Número de m´s a estimar
+  lms <- nrow(Rmod)
+  # Matriz de coeficientes del sistema de ecuaciones de balance
+  B <- rates - Rmod
+  # Vector de términos independientes del sistema
+  CS <- rep(1, lms)
+  # Resolución del sistema
+  ps <- as.data.frame(qr.solve(B, CS))
+  rownames(ps) <- paste("estado", estados)[-A]
+  colnames(ps) <-"tiempo"
+  return(ps)
+}
+```
+
+Se define $X_t$ como el número de máquinas estropeadas, consideramos cuatro máquinas disponibles y dos operarios para repararlas, donde las averías se producen según un Proceso de Poison en el que el tiempo medio entre dos averías consecutivas es de $t_f$ días, y los tiempos de reparación responden a una exponencial de media $t_r$ horas.
+Cuando una máquina se estropea es enviada a reparar, y si todos los reparadores están ocupados, queda en cola de espera hasta que uno se desocupe.
+
+El espacio de estados es $S=\{0,1,2,3,4\}$ máquinas estropeadas.
+
+Si $\lambda$ es la tasa de averías y $\mu$ la tasa de reparación, la matriz de tasas se calcula con la siguiente matriz:
+```{r matriztasas}
+## Matriz de tasas
+matriztasas=function(lambda,mu){
+# lambda : tasa de averías
+# mu: tasa de reparación
+estados <- c(0, 1, 2, 3, 4)
+nestados <- length(estados)
+R <- matrix(0,nrow = nestados, ncol = nestados, dimnames=list(estados,estados))
+
+R[1,2] <- 4*lambda 
+R[2,1] <- mu 
+R[2,3] <- 3*lambda 
+R[3,2] <- 2*mu 
+R[3,4] <- 2*lambda 
+R[4,3] <- 2*mu 
+R[4,5] <- lambda
+R[5,4] <- 2*mu
+return(R)
+}
+```
+
+Necesitarás, para resolver las cuestiones, las siguientes cantidades, y dispones (arriba) de las funciones para calcularlas:
+
+1. las tasas de permanencia
+2. la matriz generadora
+3. la matriz de probabilidades de salto
+4. la matriz de probabilidades de transición
+5. la matriz de tiempos de ocupación
+6. la distribución estacionaria
+7. el coste esperado total a horizonte finito
+8. el coste esperado total por unidad de tiempo en el largo plazo
+9. la matriz de tiempos de primer paso
+
+Responde a las cuestiones que te aparecen en el examen, utilizando los tiempos que se te facilitan.
